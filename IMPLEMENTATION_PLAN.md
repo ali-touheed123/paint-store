@@ -19,8 +19,10 @@ This document is the single source of truth for building the Paint Store e-comme
 9. [Phase 4 — Admin Dashboard](#phase-4--admin-dashboard)
 10. [Phase 5 — Integration & Polish](#phase-5--integration--polish)
 11. [Phase 6 — Testing & SEO](#phase-6--testing--seo)
-12. [Calculator Business Logic Reference](#calculator-business-logic-reference)
-13. [Considerations & Edge Cases](#considerations--edge-cases)
+12. [Phase 7 — Enhanced Features](#phase-7--enhanced-features)
+13. [Phase 8 — Mobile Optimisation & Analytics](#phase-8--mobile-optimisation--analytics)
+14. [Calculator Business Logic Reference](#calculator-business-logic-reference)
+15. [Considerations & Edge Cases](#considerations--edge-cases)
 
 ---
 
@@ -92,7 +94,8 @@ paint-store-app/
 │   │   ├── surface-adjustments.tsx         # Doors & windows counters
 │   │   ├── calculation-result.tsx          # Results card
 │   │   ├── tin-breakdown-display.tsx       # Visual drum/gallon/quarter display
-│   │   └── whatsapp-button.tsx             # Pre-filled WhatsApp CTA
+│   │   ├── whatsapp-button.tsx             # Pre-filled WhatsApp CTA
+│   │   └── calculator-presets.tsx          # Quick preset room templates
 │   ├── ui/                                 # shadcn/ui base + custom
 │   │   ├── counter-input.tsx               # ±1 increment input
 │   │   └── calculator-card.tsx             # Styled card wrapper
@@ -106,6 +109,7 @@ paint-store-app/
 │   ├── calculator/
 │   │   ├── utils.ts                        # Core calculation functions
 │   │   └── constants.ts                    # Paint types, tin sizes, factors
+│   ├── analytics.ts                        # Thin analytics wrapper
 │   ├── supabase.ts
 │   └── utils.ts
 ├── types/
@@ -161,6 +165,7 @@ CREATE TABLE paint_types (
   category    TEXT NOT NULL,             -- 'wall' | 'wood' | 'metal' | 'specialty'
   unit        TEXT NOT NULL DEFAULT 'litre',  -- 'litre' | 'kg'
   coverage    NUMERIC(8,2) NOT NULL,     -- sq ft per unit
+  available_tin_sizes TEXT[] NOT NULL DEFAULT ARRAY['drum','gallon','quarter'],
   is_active   BOOLEAN NOT NULL DEFAULT TRUE,
   sort_order  INT NOT NULL DEFAULT 0,
   created_at  TIMESTAMPTZ DEFAULT NOW()
@@ -198,13 +203,13 @@ CREATE TABLE calculator_inquiries (
 );
 
 -- Seed default paint types
-INSERT INTO paint_types (slug, label, category, unit, coverage, sort_order) VALUES
-  ('primer',        'Primer / Sealer',   'wall',      'litre', 400, 1),
-  ('emulsion',      'Emulsion',          'wall',      'litre', 350, 2),
-  ('weather-shield','Weather Shield',    'wall',      'litre', 300, 3),
-  ('enamel',        'Synthetic Enamel',  'metal',     'litre', 400, 4),
-  ('putty',         'Wall Putty',        'wall',      'kg',     20, 5),
-  ('texture',       'Texture Paint',     'wall',      'litre',  25, 6);
+INSERT INTO paint_types (slug, label, category, unit, coverage, available_tin_sizes, sort_order) VALUES
+  ('primer',        'Primer / Sealer',   'wall',      'litre', 400, ARRAY['drum','gallon','quarter'], 1),
+  ('emulsion',      'Emulsion',          'wall',      'litre', 350, ARRAY['drum','gallon','quarter'], 2),
+  ('weather-shield','Weather Shield',    'wall',      'litre', 300, ARRAY['drum','gallon','quarter'], 3),
+  ('enamel',        'Synthetic Enamel',  'metal',     'litre', 400, ARRAY['drum','gallon','quarter'], 4),
+  ('putty',         'Wall Putty',        'wall',      'kg',     20, ARRAY['drum'],                    5),
+  ('texture',       'Texture Paint',     'wall',      'litre',  25, ARRAY['drum','gallon','quarter'], 6);
 
 -- Seed default surface adjustments
 INSERT INTO surface_adjustments (slug, label, area_sq_ft) VALUES
@@ -226,6 +231,8 @@ export interface PaintType {
   category: 'wall' | 'wood' | 'metal' | 'specialty';
   unit: 'litre' | 'kg';
   coverage: number;      // sq ft per unit
+  availableTinSizes: ('drum' | 'gallon' | 'quarter')[];
+  tinSizeOverrides?: Partial<Record<'drum' | 'gallon' | 'quarter', { label: string; size: number }>>;
   isActive: boolean;
   sortOrder: number;
 }
@@ -246,6 +253,14 @@ export interface SurfaceAdjustment {
 }
 
 export type InputMode = 'dimensions' | 'direct';
+
+export interface RoomPreset {
+  label: string;
+  icon: string;
+  length: number;
+  width: number;
+  height: number;
+}
 
 export interface CalculationParams {
   inputMode: InputMode;
@@ -273,6 +288,8 @@ export interface PaintCalculation {
 ### Step 2 — Calculator Constants (`lib/calculator/constants.ts`)
 
 ```typescript
+import type { PaintType, RoomPreset } from '@/types/calculator';
+
 export const WASTAGE_FACTOR = 1.1;
 
 export const TIN_SIZES = {
@@ -287,12 +304,25 @@ export const SURFACE_ADJUSTMENTS = {
 } as const;
 
 export const DEFAULT_PAINT_TYPES: PaintType[] = [
-  { id: '1', slug: 'primer',         label: 'Primer / Sealer',  category: 'wall',  unit: 'litre', coverage: 400, isActive: true, sortOrder: 1 },
-  { id: '2', slug: 'emulsion',       label: 'Emulsion',         category: 'wall',  unit: 'litre', coverage: 350, isActive: true, sortOrder: 2 },
-  { id: '3', slug: 'weather-shield', label: 'Weather Shield',   category: 'wall',  unit: 'litre', coverage: 300, isActive: true, sortOrder: 3 },
-  { id: '4', slug: 'enamel',         label: 'Synthetic Enamel', category: 'metal', unit: 'litre', coverage: 400, isActive: true, sortOrder: 4 },
-  { id: '5', slug: 'putty',          label: 'Wall Putty',       category: 'wall',  unit: 'kg',    coverage: 20,  isActive: true, sortOrder: 5 },
-  { id: '6', slug: 'texture',        label: 'Texture Paint',    category: 'wall',  unit: 'litre', coverage: 25,  isActive: true, sortOrder: 6 },
+  { id: '1', slug: 'primer',         label: 'Primer / Sealer',  category: 'wall',  unit: 'litre', coverage: 400, availableTinSizes: ['drum','gallon','quarter'], isActive: true, sortOrder: 1 },
+  { id: '2', slug: 'emulsion',       label: 'Emulsion',         category: 'wall',  unit: 'litre', coverage: 350, availableTinSizes: ['drum','gallon','quarter'], isActive: true, sortOrder: 2 },
+  { id: '3', slug: 'weather-shield', label: 'Weather Shield',   category: 'wall',  unit: 'litre', coverage: 300, availableTinSizes: ['drum','gallon','quarter'], isActive: true, sortOrder: 3 },
+  { id: '4', slug: 'enamel',         label: 'Synthetic Enamel', category: 'metal', unit: 'litre', coverage: 400, availableTinSizes: ['drum','gallon','quarter'], isActive: true, sortOrder: 4 },
+  {
+    id: '5', slug: 'putty', label: 'Wall Putty', category: 'wall', unit: 'kg', coverage: 20,
+    availableTinSizes: ['drum'],
+    tinSizeOverrides: { drum: { label: 'Bag (20kg)', size: 20 } },
+    isActive: true, sortOrder: 5,
+  },
+  { id: '6', slug: 'texture',        label: 'Texture Paint',    category: 'wall',  unit: 'litre', coverage: 25,  availableTinSizes: ['drum','gallon','quarter'], isActive: true, sortOrder: 6 },
+];
+
+export const ROOM_PRESETS: RoomPreset[] = [
+  { label: 'Bedroom',     icon: 'bed',        length: 12, width: 10, height: 9 },
+  { label: 'Living Room', icon: 'sofa',       length: 18, width: 14, height: 10 },
+  { label: 'Hall',        icon: 'door-open',  length: 20, width: 8,  height: 10 },
+  { label: 'Kitchen',     icon: 'utensils',   length: 12, width: 10, height: 9 },
+  { label: 'Bathroom',    icon: 'bath',       length: 8,  width: 6,  height: 9 },
 ];
 ```
 
@@ -306,13 +336,12 @@ export function calculateRoomArea(length: number, width: number, height: number)
   return 2 * (length + width) * height;
 }
 
-export function calculateTinBreakdown(units: number, tinSizes: typeof TIN_SIZES): TinBreakdown {
-  const size = tinSizes.DRUM.litres;
-  const drums = Math.floor(units / tinSizes.DRUM.litres);
-  const afterDrums = units % tinSizes.DRUM.litres;
-  const gallons = Math.floor(afterDrums / tinSizes.GALLON.litres);
-  const afterGallons = afterDrums % tinSizes.GALLON.litres;
-  const quarters = Math.ceil(afterGallons / tinSizes.QUARTER.litres);
+export function calculateTinBreakdown(units: number): TinBreakdown {
+  const drums = Math.floor(units / TIN_SIZES.DRUM.litres);
+  const afterDrums = units % TIN_SIZES.DRUM.litres;
+  const gallons = Math.floor(afterDrums / TIN_SIZES.GALLON.litres);
+  const afterGallons = afterDrums % TIN_SIZES.GALLON.litres;
+  const quarters = afterGallons > 0 ? Math.ceil(afterGallons / TIN_SIZES.QUARTER.litres) : 0;
   return { drums, gallons, quarters, totalUnits: drums + gallons + quarters, exactUnits: units };
 }
 
@@ -334,15 +363,15 @@ export function calculatePaintRequirements(params: CalculationParams): PaintCalc
     totalArea,
     netArea,
     unitsNeeded,
-    tinBreakdown: calculateTinBreakdown(unitsNeeded, TIN_SIZES),
+    tinBreakdown: calculateTinBreakdown(unitsNeeded),
     unit: paintType.unit,
   };
 }
 
-export function formatTinBreakdown(breakdown: TinBreakdown): string {
+export function formatTinBreakdown(breakdown: TinBreakdown, unit: 'litre' | 'kg'): string {
   const parts: string[] = [];
-  if (breakdown.drums)   parts.push(`${breakdown.drums} Drum${breakdown.drums > 1 ? 's' : ''} (16L)`);
-  if (breakdown.gallons) parts.push(`${breakdown.gallons} Gallon${breakdown.gallons > 1 ? 's' : ''} (3.64L)`);
+  if (breakdown.drums)    parts.push(`${breakdown.drums} Drum${breakdown.drums > 1 ? 's' : ''} (16${unit === 'kg' ? 'kg' : 'L'})`);
+  if (breakdown.gallons)  parts.push(`${breakdown.gallons} Gallon${breakdown.gallons > 1 ? 's' : ''} (3.64L)`);
   if (breakdown.quarters) parts.push(`${breakdown.quarters} Quarter${breakdown.quarters > 1 ? 's' : ''} (0.91L)`);
   return parts.length ? parts.join(' + ') : 'Less than 1 quarter';
 }
@@ -359,27 +388,68 @@ export function generateWhatsAppMessage(
     .replace('{totalArea}', calc.totalArea.toFixed(0));
   return `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(message)}`;
 }
+
+export function generateShareableUrl(params: CalculationParams, baseUrl: string): string {
+  const searchParams = new URLSearchParams({
+    mode: params.inputMode,
+    paintType: params.paintType.slug,
+    doors: String(params.doors),
+    windows: String(params.windows),
+    coats: String(params.coats),
+    ...(params.inputMode === 'dimensions'
+      ? { l: String(params.roomLength), w: String(params.roomWidth), h: String(params.roomHeight) }
+      : { area: String(params.directArea) }),
+  });
+  return `${baseUrl}/calculator?${searchParams.toString()}`;
+}
+```
+
+### Step 4 — Analytics Wrapper (`lib/analytics.ts`)
+
+```typescript
+type CalculatorEvent =
+  | 'calculator_calculation_performed'
+  | 'calculator_whatsapp_clicked'
+  | 'calculator_paint_type_selected'
+  | 'calculator_preset_applied'
+  | 'calculator_share_link_copied';
+
+export function trackEvent(event: CalculatorEvent, properties?: Record<string, unknown>): void {
+  if (typeof window === 'undefined') return;
+  // Replace with actual analytics provider (e.g. PostHog, Plausible, GA4)
+  console.debug('[analytics]', event, properties);
+}
 ```
 
 ---
 
 ## Phase 2 — Paint Calculator Feature
 
-### Step 4 — Component Architecture
+### Step 5 — Component Architecture
 
 Each component has a single responsibility. State lives in the parent `paint-calculator.tsx`.
 
 #### `components/calculator/paint-calculator.tsx` (main container)
 
 - Manages `inputMode`, `params`, and `result` state
+- Reads `?paintType=`, `?mode=`, `?l=`, `?w=`, `?h=`, `?area=` from `useSearchParams()` to support deep-linking and product page pre-selection
 - Renders tabs: **"Room Dimensions"** | **"Direct Area"**
-- Calls `calculatePaintRequirements()` on every param change (debounced 300 ms)
+- Calls `calculatePaintRequirements()` on every param change (debounced 300 ms, via `useMemo`)
 - Renders `<CalculationResult />` in a sticky right column on desktop, collapsed below on mobile
+- Fires `trackEvent('calculator_calculation_performed', { paintType, totalArea, unitsNeeded })` when result updates
 
 #### `components/calculator/dimension-inputs.tsx`
 
 - Three number inputs: Length, Width, Height (all in feet)
 - Shows live area preview: `2 × (L+W) × H = {area} sq ft`
+- Accepts an optional `onPresetApply` callback to populate fields from a `RoomPreset`
+
+#### `components/calculator/calculator-presets.tsx`
+
+- Row of 5 quick-preset buttons (Bedroom, Living Room, Hall, Kitchen, Bathroom)
+- Each preset uses a `RoomPreset` from `ROOM_PRESETS` constant
+- Clicking a preset calls `onPresetApply(preset)` and fires `trackEvent('calculator_preset_applied', { preset: preset.label })`
+- Highlighted with gold border when active
 
 #### `components/calculator/direct-area-input.tsx`
 
@@ -391,6 +461,7 @@ Each component has a single responsibility. State lives in the parent `paint-cal
 - `<Select>` component populated from `PAINT_TYPES` (or API)
 - Shows unit alongside each option: "Emulsion — 350 sq ft / litre"
 - Groups by `category`: Wall Paints | Metal & Wood | Specialty
+- Fires `trackEvent('calculator_paint_type_selected', { paintType: slug })` on change
 
 #### `components/calculator/surface-adjustments.tsx`
 
@@ -401,38 +472,42 @@ Each component has a single responsibility. State lives in the parent `paint-cal
 
 #### `components/calculator/calculation-result.tsx`
 
-- Shows: Total Area, Net Area (after wastage), Units Needed
+- Shows: Total Area, Net Area (after wastage), Units Needed (with correct unit label)
 - Renders `<TinBreakdownDisplay />`
-- Renders `<WhatsAppButton />`
+- Renders `<WhatsAppButton />` and a **Share Link** copy button
 - Animates in with Framer Motion `fadeInUp` on result change
+- `aria-live="polite"` wrapper so screen readers announce new values
 
 #### `components/calculator/tin-breakdown-display.tsx`
 
 - Visual icon + count row for each tin size (drum, gallon, quarter)
-- Uses navy/gold colour tokens
-- Greyed out when count is 0
+- Only renders tin sizes listed in `paintType.availableTinSizes`
+- Uses `paintType.tinSizeOverrides` labels when present (e.g. "Bag (20kg)" for putty)
+- Uses navy/gold colour tokens; greyed out when count is 0
 
 #### `components/calculator/whatsapp-button.tsx`
 
 - Renders a large emerald green button with WhatsApp icon
-- Opens `generateWhatsAppMessage()` URL in new tab
+- Opens `generateWhatsAppMessage()` URL in a new tab
 - Fires POST to `/api/calculator/inquiries` (fire-and-forget) to track the lead
+- Fires `trackEvent('calculator_whatsapp_clicked', { paintType, unitsNeeded })`
 - Shows "Chat on WhatsApp" label
 
 #### `components/ui/counter-input.tsx`
 
 - `−` button / number display / `+` button
-- Accepts `min`, `max`, `value`, `onChange`
-- Accessible: uses `aria-label="Decrease doors"` etc.
+- Accepts `min`, `max`, `value`, `onChange`, `label`
+- Accessible: `aria-label="Decrease doors"` / `aria-label="Increase doors"` on each button
 
-### Step 5 — Calculator Page (`app/calculator/page.tsx`)
+### Step 6 — Calculator Page (`app/calculator/page.tsx`)
 
 - Full-page layout with two-column grid (inputs left, result right) on `lg+`
 - SEO title: "Paint Calculator — How Much Paint Do I Need? | The Paint Hub"
 - Breadcrumb: Home › Calculator
-- FAQ accordion below the calculator for SEO
+- FAQ accordion below the calculator for SEO content
+- Share button copies `generateShareableUrl()` result to clipboard and fires `trackEvent('calculator_share_link_copied')`
 
-### Step 6 — API Routes
+### Step 7 — API Routes
 
 #### `app/api/calculator/paint-types/route.ts`
 ```typescript
@@ -471,7 +546,9 @@ Sections (top to bottom):
 
 - Image gallery (product images from `/images/products/{brand}/`)
 - Product description, brand, category, available sizes
-- **"Calculate Paint Needs" section** — renders `<PaintCalculator />` with `defaultPaintType` pre-selected from product category
+- **"Calculate Paint Needs" section** — renders `<PaintCalculator />` with `defaultPaintType` pre-selected from product category via `?paintType={slug}` query param
+- **"You may also need" section** — product recommendations (complementary products, e.g. primer when viewing emulsion)
+- **"Add to Cart" with calculated quantity** — after calculation, an "Add {drums}×16L + {gallons}×3.64L to Cart" button pre-fills the cart with the recommended tin breakdown
 - Related products carousel
 
 ---
@@ -481,9 +558,9 @@ Sections (top to bottom):
 ### Calculator Settings Page (`app/admin/calculator/page.tsx`)
 
 Features:
-- **Paint Types table** — edit `label`, `coverage`, `unit`, `isActive`, `sortOrder`
+- **Paint Types table** — edit `label`, `coverage`, `unit`, `availableTinSizes`, `isActive`, `sortOrder`
 - **Surface Adjustments table** — edit door/window `areaSqFt` values
-- **Inquiry Stats** — total calculations, WhatsApp clicks, most popular paint type
+- **Inquiry Stats** — total calculations, WhatsApp clicks, most popular paint type, calculations per day chart
 - All edits persist to Supabase via server actions
 
 ---
@@ -496,13 +573,14 @@ The WhatsApp number `923475658761` is read from `NEXT_PUBLIC_WHATSAPP_NUMBER`. T
 
 ### Pre-selecting Paint Type from Product Page
 
-Pass `?paintType=emulsion` (or the product's `paintTypeSlug`) as a query param to `/calculator`. The calculator reads `useSearchParams()` and sets the default selection accordingly.
+Pass `?paintType=emulsion` (or the product's `paintTypeSlug`) as a query param to `/calculator`. The calculator reads `useSearchParams()` and sets the default selection accordingly. All dimension params (`?l=12&w=10&h=9`) are also supported for shareable pre-filled links.
 
 ### Mobile Optimisations
 
 - Collapsible "Advanced Options" section (coats, surface adjustments) — hidden by default on mobile
 - Sticky result card at bottom of screen on mobile using `position: sticky`
 - `inputMode="numeric"` on all number inputs to trigger numeric keypad on iOS/Android
+- Swipeable paint type selector on mobile (horizontal scroll with snap)
 
 ---
 
@@ -521,7 +599,8 @@ describe('calculateTinBreakdown', () => {
   it('fills drums first, then gallons, then quarters', ...)
   it('rounds quarters up (never short-ship)', ...)
   it('handles exact multiples without remainder', ...)
-  it('handles less than one quarter', ...)
+  it('handles less than one quarter — returns 1 quarter', ...)
+  it('returns 0 quarters when remainder is exactly 0', ...)
 })
 
 describe('calculatePaintRequirements', () => {
@@ -529,11 +608,18 @@ describe('calculatePaintRequirements', () => {
   it('multiplies by coats correctly', ...)
   it('adds door and window areas', ...)
   it('uses direct area when inputMode is "direct"', ...)
+  it('returns zero result guard when all inputs are 0', ...)
 })
 
 describe('generateWhatsAppMessage', () => {
   it('encodes special characters in message', ...)
   it('substitutes all template placeholders', ...)
+  it('produces a valid wa.me URL', ...)
+})
+
+describe('generateShareableUrl', () => {
+  it('encodes dimensions mode params correctly', ...)
+  it('encodes direct area mode params correctly', ...)
 })
 ```
 
@@ -542,6 +628,90 @@ describe('generateWhatsAppMessage', () => {
 - `/calculator` page: `<title>Paint Calculator — How Much Paint Do I Need?</title>`
 - FAQ schema (`application/ld+json`) with questions like "How do I calculate how much paint I need?"
 - Open Graph image showing the calculator UI
+- Sitemap includes `/calculator`
+
+---
+
+## Phase 7 — Enhanced Features
+
+### Quick Presets
+
+- Five room presets defined in `ROOM_PRESETS` constant: Bedroom (12×10×9), Living Room (18×14×10), Hall (20×8×10), Kitchen (12×10×9), Bathroom (8×6×9)
+- Rendered as icon chips above the dimension inputs
+- Clicking a preset fills L/W/H fields and switches to "Room Dimensions" mode
+- Active preset highlighted; clears when any field is manually changed
+
+### Shareable Links
+
+- "Share this calculation" button on the results card
+- Calls `generateShareableUrl(params, siteUrl)` to build a URL with all params encoded as query strings
+- Copies to clipboard with a "Copied!" toast confirmation
+- Recipients landing on the URL see the calculator pre-filled with the shared values
+
+### PDF Export
+
+- "Download Summary" button below results (PDF icon, navy colour)
+- Generates a printable one-page PDF via `window.print()` or a `react-pdf` renderer
+- PDF includes: company logo, paint type, area breakdown, tin breakdown, WhatsApp contact CTA
+- Filename: `paint-estimate-{date}.pdf`
+
+### Product Recommendations
+
+- After calculation, show "Products you may need" section
+- Query `/api/products?paintType={slug}&limit=4` to fetch matching products
+- Display as a compact horizontal card row below the result
+- Each card links to the product detail page with `?paintType={slug}` pre-selected
+
+### Cart Integration
+
+- On the product detail page, after running the calculator, a contextual CTA replaces the standard "Add to Cart" button
+- Label: "Add recommended quantity to cart" showing the tin breakdown
+- Adds the correct quantity of each tin size to the cart automatically
+
+---
+
+## Phase 8 — Mobile Optimisation & Analytics
+
+### Mobile-First Enhancements
+
+- Calculator inputs collapse into an accordion on screens < 640px
+- Results panel uses a bottom sheet (slide-up drawer) on mobile, triggered by a floating "View Results" button
+- All number inputs use `type="number"` with `inputMode="numeric"` and `pattern="[0-9]*"` for iOS/Android numeric keyboards
+- Paint type selector renders as a horizontal swipeable chip list on mobile (falls back to `<Select>` on desktop)
+- Preset chips are horizontally scrollable with CSS scroll snap
+
+### Analytics Events
+
+All events are fired through `lib/analytics.ts`:
+
+| Event | When | Properties |
+|---|---|---|
+| `calculator_calculation_performed` | On every debounced param change | `paintType`, `inputMode`, `totalArea`, `unitsNeeded` |
+| `calculator_whatsapp_clicked` | On WhatsApp button click | `paintType`, `unitsNeeded`, `drums`, `gallons`, `quarters` |
+| `calculator_paint_type_selected` | On paint type dropdown change | `paintType`, `previousPaintType` |
+| `calculator_preset_applied` | On preset chip click | `preset` |
+| `calculator_share_link_copied` | On share button click | `paintType`, `inputMode` |
+
+### SEO / Structured Data
+
+```json
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I calculate how much paint I need?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Multiply the perimeter of the room by the ceiling height: 2 × (Length + Width) × Height. Add 10% for wastage and divide by the paint's coverage rate." }
+    },
+    {
+      "@type": "Question",
+      "name": "What tin sizes are available?",
+      "acceptedAnswer": { "@type": "Answer", "text": "We stock Drums (16L), Gallons (3.64L), and Quarters (0.91L). The calculator tells you the exact combination you need." }
+    }
+  ]
+}
+```
 
 ---
 
@@ -563,7 +733,7 @@ drums           = floor(unitsNeeded ÷ 16)
 remaining       = unitsNeeded mod 16
 gallons         = floor(remaining ÷ 3.64)
 remaining       = remaining mod 3.64
-quarters        = ceil(remaining ÷ 0.91)
+quarters        = remaining > 0 ? ceil(remaining ÷ 0.91) : 0
 ```
 
 ### Coverage Rates
@@ -594,17 +764,27 @@ quarters        = ceil(remaining ÷ 0.91)
 
 > **Note:** Doors and windows **add** to the painted area (they represent paintable frame/surround surfaces, not unpainted voids). If a future requirement changes this to subtract unpainted glass/panel areas, update `adjustmentArea` to use subtraction and update the UI label accordingly.
 
+### Room Presets (Default Dimensions in Feet)
+
+| Room | Length | Width | Height |
+|---|---|---|---|
+| Bedroom | 12 | 10 | 9 |
+| Living Room | 18 | 14 | 10 |
+| Hall | 20 | 8 | 10 |
+| Kitchen | 12 | 10 | 9 |
+| Bathroom | 8 | 6 | 9 |
+
 ---
 
 ## Considerations & Edge Cases
 
-1. **Putty is in kg, not litres** — The UI must show "kg" as the unit when putty is selected. The tin size labels should read "Bag (20kg)", "Bag (5kg)" etc. for putty, not drums/gallons. Implement a `PaintType.tinSizeOverrides` field to support this.
+1. **Putty is in kg, not litres** — The UI must show "kg" as the unit when putty is selected. The `tinSizeOverrides` field on `PaintType` customises the tin size labels; for putty the drum label reads "Bag (20kg)" instead of "Drum (16L)". Only tin sizes listed in `availableTinSizes` are shown.
 
 2. **Admin configurability** — Coverage rates should be editable in the admin without a redeploy. The `paint_types` Supabase table feeds the calculator. The Next.js API route falls back to `DEFAULT_PAINT_TYPES` constants if the DB is unreachable.
 
-3. **Quarters must never short-ship** — Always `Math.ceil` the quarter calculation. Never `Math.floor` or round to nearest.
+3. **Quarters must never short-ship** — Always `Math.ceil` the quarter calculation. Never `Math.floor` or round to nearest. Use the guard `remaining > 0 ? Math.ceil(...) : 0` to avoid returning 1 quarter when there is no remainder.
 
-4. **Zero result guard** — If `unitsNeeded <= 0` (e.g. all dimensions are 0), show an empty state with "Please enter valid dimensions."
+4. **Zero result guard** — If `unitsNeeded <= 0` (e.g. all dimensions are 0), show an empty state with "Please enter valid dimensions." Do not render the results card.
 
 5. **Coats minimum** — Coats counter should enforce `min=1`. Do not allow 0 coats.
 
@@ -614,6 +794,12 @@ quarters        = ceil(remaining ÷ 0.91)
 
 8. **WhatsApp deeplink** — The URL format `https://wa.me/{number}?text={encoded}` works for both mobile app and WhatsApp Web. The number must include country code with no `+` prefix (e.g. `923475658761`).
 
-9. **Analytics** — Track these events: `calculator_calculation_performed`, `calculator_whatsapp_clicked`, `calculator_paint_type_selected`. Fire them via a thin analytics wrapper so the provider can be swapped later.
+9. **Analytics** — Track all five events listed in Phase 8 via `lib/analytics.ts`. The wrapper pattern allows swapping the analytics provider (PostHog, Plausible, GA4) without touching component code.
 
-10. **Tin size availability** — Not all products come in all tin sizes. Add an optional `availableTinSizes: ('drum' | 'gallon' | 'quarter')[]` field to `PaintType` for future UX improvements (e.g. greying out unavailable sizes in the breakdown display).
+10. **Tin size availability** — Not all products come in all tin sizes. The `availableTinSizes: ('drum' | 'gallon' | 'quarter')[]` field on `PaintType` controls which rows render in `<TinBreakdownDisplay />`. The DB column `available_tin_sizes TEXT[]` stores the same data for admin configurability.
+
+11. **Shareable URL length** — All calculation params fit comfortably within a standard URL. No URL shortening is needed. The share button uses the Clipboard API with a graceful fallback `prompt()` for unsupported browsers.
+
+12. **PDF export dependency** — Use `window.print()` with a print-specific CSS stylesheet as the MVP approach. Upgrade to `@react-pdf/renderer` if richer formatting is required.
+
+13. **Cart integration data model** — The cart must support line items with a `tinSize` attribute (`drum` | `gallon` | `quarter`) and `quantity`. Ensure the products table has `tin_size` and `price_per_tin` columns before implementing Phase 7 cart integration.
