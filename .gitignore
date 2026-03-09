@@ -1,0 +1,28 @@
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Logs
+*.log
+
+# Optional: Uncomment if you want to ignore source files that are processed
+# *.psd
+# *.ai
+# *.sketch
